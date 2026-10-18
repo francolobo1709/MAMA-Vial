@@ -81,9 +81,38 @@ python telegram_bot.py
 
 ---
 
+## 🍓 Despliegue 24/7 en Raspberry Pi (Servicio Autónomo)
+
+Para que Mari funcione continuamente en una Raspberry Pi y arranque automáticamente al encenderla:
+
+```bash
+# 1. Dar permisos de ejecución al instalador
+chmod +x deploy/instalar_raspberry.sh
+
+# 2. Ejecutar instalación desatendida y alta en systemd
+./deploy/instalar_raspberry.sh
+```
+
+Comandos útiles de gestión en la Raspberry Pi:
+```bash
+sudo journalctl -u mari.service -f     # Ver logs en vivo
+sudo systemctl restart mari.service     # Reiniciar
+sudo systemctl status mari.service      # Estado del proceso
+```
+
+---
+
+## 🩺 Diagnóstico y Monitoreo en Telegram
+
+El bot cuenta con comandos dedicados de diagnóstico de salud y rendimiento:
+- `/ping`: Verifica conectividad con Telegram y latencia en milisegundos.
+- `/health`: Reporte integral de consumo de CPU, RAM del sistema y del proceso, latencia real contra Google Gemini API, turnos de memoria activa y locutora en uso.
+
+---
+
 ## 🐳 Despliegue con Docker (Producción / Beta)
 
-Para mantener el bot corriendo de forma continua y desatendida en un servidor VPS o plataforma cloud:
+Para mantener el bot corriendo en un contenedor aislado:
 
 ```bash
 docker compose up -d --build
@@ -99,6 +128,10 @@ docker compose logs -f
 ## 📁 Estructura del Proyecto
 
 ```text
+├── deploy/
+│   ├── mari.service          # Unidad systemd para Raspberry Pi / Linux
+│   ├── instalar_raspberry.sh # Script automatizado de aprovisionamiento
+│   └── README_RASPBERRY.md   # Guía paso a paso para Raspberry Pi
 ├── services/
 │   ├── auth_service.py       # Control de accesos y persistencia de usuarios
 │   ├── excel_injector.py     # Inyección en planillas Excel sin romper formatos
@@ -109,7 +142,7 @@ docker compose logs -f
 ├── 12-10-26.xlsx             # Planilla Excel base de ensayos de laboratorio
 ├── telegram_bot.py           # Orquestador del bot de Telegram y cascada Gemini
 ├── requirements.txt          # Dependencias fijadas para producción
-├── Dockerfile                # Imagen Docker optimizada
+├── Dockerfile                # Imagen Docker optimizada (AMD64 / ARM)
 ├── docker-compose.yml        # Orquestación de contenedores
 ├── .env.example              # Plantilla de variables de entorno seguras
 └── .gitignore                # Reglas de exclusión de secretos y temporales

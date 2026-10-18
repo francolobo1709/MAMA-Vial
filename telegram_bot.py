@@ -15,11 +15,18 @@ from __future__ import annotations
 import os
 import re
 import json
+import time
+import platform
 import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 from telegram import (
     Update,
@@ -49,6 +56,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("MariBot")
+BOT_START_TIME = time.time()
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -528,7 +536,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/limpiar`: Reiniciar memoria de conversación\n"
         "• `/clave`: Consultar clave de acceso para colaboradores\n"
         "• `/analizar_lote`: Cruzar y procesar todas las planillas Excel en cola y generar informe PDF\n"
-        "• `/limpiar_lote`: Vaciar la cola de planillas temporal"
+        "• `/limpiar_lote`: Vaciar la cola de planillas temporal\n"
+        "• `/ping`: Comprobar respuesta inmediata y latencia\n"
+        "• `/health`: Diagnóstico integral de CPU, RAM, IA Gemini y estado del sistema"
     )
     await update.message.reply_text(saludo, parse_mode="Markdown")
 
@@ -643,6 +653,122 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     memory_repo.clear()
     await update.message.reply_text("🧹 Memoria de conversación reiniciada en blanco.")
+
+
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Comprobación rápida de latencia de red y disponibilidad de Mari."""
+    if not update.effective_chat or not update.message:
+        return
+    if not is_authorized(update):
+        await send_unauthorized_message(update)
+        return
+
+    start_eval = time.time()
+    sent_msg = await update.message.reply_text("🏓 Calculando latencia...")
+    latency_ms = int((time.time() - start_eval) * 1000)
+
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    hours, remainder = divmod(uptime_sec, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    await sent_msg.edit_text(
+        f"🏓 *¡Pong!*\n\n"
+        f"• *Latencia Telegram:* `{latency_ms} ms`\n"
+        f"• *Tiempo activo (Uptime):* `{uptime_str}`\n"
+        f"• *Modelo preferido:* `{mari_service.preferred_model}`\n"
+        f"• *Estado:* `🟢 Mari Operativa 24/7`",
+        parse_mode="Markdown",
+    )
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Diagnóstico completo de CPU, RAM, latencia de IA y persistencia."""
+    if not update.effective_chat or not update.message:
+        return
+    if not is_authorized(update):
+        await send_unauthorized_message(update)
+        return
+
+    status_msg = await update.message.reply_text("🔍 *Ejecutando diagnóstico integral de Mari...*", parse_mode="Markdown")
+
+    # 1. Uptime
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    days, remainder = divmod(uptime_sec, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{days}d {hours}h {minutes}m {seconds}s" if days > 0 else f"{hours}h {minutes}m {seconds}s"
+
+    # 2. Host & OS
+    os_name = f"{platform.system()} {platform.release()}"
+    arch = platform.machine()
+    py_version = platform.python_version()
+    try:
+        if os.path.exists("/proc/device-tree/model"):
+            with open("/proc/device-tree/model", "r", encoding="utf-8", errors="ignore") as f:
+                model_info = f.read().strip()
+                if model_info:
+                    os_name = f"{model_info} ({os_name})"
+    except Exception:
+        pass
+
+    # 3. Memoria RAM y CPU
+    ram_usage = "N/D"
+    cpu_percent = "N/D"
+    if psutil is not None:
+        try:
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            process_ram_mb = mem_info.rss / (1024 * 1024)
+            sys_mem = psutil.virtual_memory()
+            cpu_percent = f"{psutil.cpu_percent(interval=0.1)}%"
+            ram_usage = f"{process_ram_mb:.1f} MB (Sistema: {sys_mem.percent}% en uso)"
+        except Exception as exc:
+            ram_usage = f"Error: {exc}"
+    else:
+        ram_usage = "psutil no disponible"
+
+    # 4. Latencia de API Google Gemini
+    gemini_status = "🟡 Pendiente"
+    t_start = time.time()
+    try:
+        _ = mari_service.client.models.generate_content(
+            model=mari_service.preferred_model,
+            contents="Hola",
+            config=types.GenerateContentConfig(max_output_tokens=3, temperature=0.0),
+        )
+        t_gemini = int((time.time() - t_start) * 1000)
+        gemini_status = f"🟢 Conectado ({t_gemini} ms) - `{mari_service.preferred_model}`"
+    except Exception as exc:
+        t_gemini = int((time.time() - t_start) * 1000)
+        gemini_status = f"🔴 Error ({t_gemini} ms): {exc}"
+
+    # 5. Voz activa y TTS
+    settings = settings_repo.get_settings()
+    voice_key = settings.get("voice_key", "elena")
+    voice_name = AVAILABLE_VOICES.get(voice_key, {}).get("name", voice_key)
+
+    # 6. Almacenamiento y cola de trabajo
+    cola_dir = DATA_DIR / "cola_uploads"
+    archivos_cola = len(list(cola_dir.glob("*"))) if cola_dir.exists() else 0
+    turnos_memoria = memory_repo.count_turns()
+
+    informe = (
+        "🩺 *Diagnóstico del Sistema - Mari (Asistente Vial)*\n"
+        "══════════════════════════════\n"
+        f"⏱ *Uptime:* `{uptime_str}`\n"
+        f"🖥️ *Plataforma:* `{os_name} [{arch}]`\n"
+        f"🐍 *Python:* `v{py_version}`\n"
+        f"⚡ *CPU:* `{cpu_percent}` | *RAM:* `{ram_usage}`\n"
+        "──────────────────────────────\n"
+        f"🤖 *IA Gemini:* {gemini_status}\n"
+        f"🎙️ *Locutora Activa:* {voice_name}\n"
+        f"🧠 *Turnos de Memoria:* `{turnos_memoria}`\n"
+        f"📁 *Planillas en Cola:* `{archivos_cola}`\n"
+        "══════════════════════════════\n"
+        "✅ *Estado:* Totalmente operativo para trabajo de campo."
+    )
+    await status_msg.edit_text(informe, parse_mode="Markdown")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1076,6 +1202,8 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("clave", clave_command))
     app.add_handler(CommandHandler("analizar_lote", handle_analizar_lote))
     app.add_handler(CommandHandler("limpiar_lote", handle_limpiar_lote))
+    app.add_handler(CommandHandler("ping", ping_command))
+    app.add_handler(CommandHandler("health", health_command))
 
     # Botones interactivos
     app.add_handler(CallbackQueryHandler(voice_callback))

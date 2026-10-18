@@ -1,0 +1,23 @@
+[Unit]
+Description=Mari - Asistente de Laboratorio Vial y Software
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/MAMA-Vial
+ExecStart=/home/pi/MAMA-Vial/.venv/bin/python telegram_bot.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+# Cargar variables de entorno
+EnvironmentFile=/home/pi/MAMA-Vial/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

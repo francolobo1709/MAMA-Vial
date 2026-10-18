@@ -4,10 +4,11 @@ echo =====================================================================
 echo  Subiendo proyecto MAMA-Vial a GitHub (francolobo1709/MAMA-Vial)
 echo =====================================================================
 echo.
+git add .
+git commit -m "feat: mejoras operativas, diagnostico /health /ping y despliegue systemd en Raspberry Pi"
 git push -u origin main
-git push origin main:master
 echo.
 echo =====================================================================
-echo  Proceso finalizado. Actualiza la pagina en GitHub con F5.
+echo  Proceso finalizado. Repositorio actualizado en GitHub.
 echo =====================================================================
 pause
