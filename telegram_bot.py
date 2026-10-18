@@ -49,6 +49,7 @@ from services.backup_service import BackupService
 from services.excel_injector import ExcelInjectorService
 from services.lab_calculator import LabSpreadsheetService
 from services.pdf_generator import LabPdfReportService, generar_informe_pdf
+from services.photogrammetry_volume_service import StockpilePhotogrammetryService
 
 load_dotenv()
 
@@ -407,6 +408,7 @@ tts_service = TTSService(settings_repo)
 mari_service = GeminiAssistantService(memory_repo)
 auth_service = AuthService()
 backup_service = BackupService()
+photogrammetry_service = StockpilePhotogrammetryService()
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +678,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/limpiar_lote`: Vaciar la cola de planillas temporal\n"
         "• `/ping`: Comprobar respuesta inmediata y latencia\n"
         "• `/health`: Diagnóstico integral de CPU, RAM, temperatura, IA y estado\n"
-        "• `/backup`: Descargar copia de seguridad ZIP de planillas y memoria"
+        "• `/backup`: Descargar copia de seguridad ZIP de planillas y memoria\n"
+        "• `/cubicar`: Cubicación fotogramétrica de acopios sin GNSS (TIN 2.5D y RANSAC)"
     )
     await update.message.reply_text(saludo, parse_mode="Markdown")
 
@@ -961,6 +964,36 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(f"⚠️ *Error al generar respaldo:* {exc}", parse_mode="Markdown")
 
 
+async def cubicar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explica y guía al usuario en la cubicación fotogramétrica de acopios sin GNSS."""
+    if not update.effective_chat or not update.message:
+        return
+    if not is_authorized(update):
+        await send_unauthorized_message(update)
+        return
+
+    guia = (
+        "📐 *Cubicación Fotogramétrica de Acopios sin GNSS - Mari*\n"
+        "══════════════════════════════\n"
+        "Puedes calcular el volumen métrico (m³) y tonelaje de cualquier acopio de obra "
+        "usando únicamente fotografías y visión artificial:\n\n"
+        "*1. Protocolo de Campo (Sin GNSS):*\n"
+        "• Coloca una **barra o mira de escala conocida** (ej. 1.00 m o 2.00 m) o una diana/marcador ArUco junto al pie del acopio.\n"
+        "• Toma una serie de fotos caminando alrededor del acopio (360° con 70% de solape).\n\n"
+        "*2. Procesamiento y Cubicación:*\n"
+        "• Sube directamente a este chat el archivo de nube de puntos resultante (`.xyz`, `.pts`, `.csv` o `.ply`).\n"
+        "• Mari ajustará automáticamente el **plano del terreno base mediante RANSAC 3D**, "
+        "nivelará el suelo horizontalmente y computará la red de triángulos irregulares (**TIN Delaunay 2.5D**).\n\n"
+        "*Materiales soportados para cálculo de tonelaje:*\n"
+        "• Piedra partida (1.55 t/m³)\n"
+        "• Arena (1.65 t/m³)\n"
+        "• Fresado asfáltico RAP (2.15 t/m³)\n"
+        "• Mezcla asfáltica densa (2.35 t/m³)\n"
+        "• Suelo seleccionado (1.80 t/m³)"
+    )
+    await update.message.reply_text(guia, parse_mode="Markdown")
+
+
 async def background_supervisor(app: Application) -> None:
     """Supervisa en segundo plano la temperatura, caídas de tensión y realiza respaldos automáticos diarios."""
     logger.info("Supervisor en segundo plano activado (temperatura, alimentación y backups diarios).")
@@ -1201,10 +1234,47 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     doc = update.message.document
     filename = doc.file_name or "planilla.xlsx"
 
-    # Validar extensión de archivo de planilla
+    # 1. Procesamiento de nubes de puntos 3D de acopios (.xyz, .pts, .ply, .txt)
+    if filename.lower().endswith((".xyz", ".pts", ".ply", ".txt")):
+        chat_id = update.effective_chat.id
+        chat_folder = COLA_UPLOADS_DIR / str(chat_id)
+        chat_folder.mkdir(parents=True, exist_ok=True)
+        destino_archivo = chat_folder / filename
+
+        try:
+            doc_file = await context.bot.get_file(doc.file_id)
+            await doc_file.download_to_drive(str(destino_archivo))
+
+            with open(destino_archivo, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read(10_000_000)
+
+            pts = photogrammetry_service.load_point_cloud_from_text(content)
+            status_msg = await update.message.reply_text("📐 *Procesando nube de puntos densa con Delaunay TIN 2.5D y RANSAC...*", parse_mode="Markdown")
+            metrics = photogrammetry_service.calculate_volume_tin(pts, material="piedra_partida")
+
+            reporte = (
+                "📊 *Certificado de Cubicación Fotogramétrica de Acopio*\n"
+                "══════════════════════════════\n"
+                f"📦 *Volumen Calculado:* `{metrics.volumen_m3:,.2f} m³`\n"
+                f"⚖️ *Tonelaje Estimado:* `{metrics.tonelaje_estimado:,.2f} t` ({metrics.material})\n"
+                "──────────────────────────────\n"
+                f"📐 *Área de Huella Base:* `{metrics.area_base_m2:,.2f} m²`\n"
+                f"⛰️ *Altura Máxima de Cresta:* `{metrics.altura_maxima_m:.2f} m`\n"
+                f"📏 *Altura Media del Talud:* `{metrics.altura_media_m:.2f} m`\n"
+                f"🎯 *Puntos 3D Integrados:* `{metrics.puntos_acopio:,} de {metrics.puntos_totales:,}`\n"
+                f"🌐 *Plano del Terreno (RANSAC):* `{metrics.plano_terreno_coeficientes}`\n"
+                "══════════════════════════════\n"
+                "✅ *Método:* Red de Triángulos Irregulares (TIN 2.5D) nivelada respecto a cota cero (sin GNSS)."
+            )
+            await status_msg.edit_text(reporte, parse_mode="Markdown")
+            return
+        except Exception as exc:
+            logger.warning("No se pudo procesar como nube de puntos: %s", exc)
+
+    # 2. Validar extensión de archivo de planilla
     if not filename.lower().endswith((".xlsx", ".xls", ".csv")):
         await update.message.reply_text(
-            "⚠️ Por favor, envía archivos de planilla (.xlsx, .xls o .csv) para el análisis técnico de laboratorio."
+            "⚠️ Por favor, envía archivos de planilla (.xlsx, .xls, .csv) o nubes de puntos de acopio (.xyz, .pts, .ply)."
         )
         return
 
@@ -1525,6 +1595,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CommandHandler("cubicar", cubicar_command))
 
     # Botones interactivos
     app.add_handler(CallbackQueryHandler(voice_callback))

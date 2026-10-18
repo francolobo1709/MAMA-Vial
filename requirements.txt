@@ -21,6 +21,10 @@ matplotlib>=3.8.0
 edge-tts>=7.0.0
 gTTS>=2.5.0
 
+# Visión Artificial y Fotogrametría
+opencv-python-headless>=4.8.0
+scipy>=1.11.0
+
 # Configuración y Variables de Entorno
 python-dotenv>=1.0.0
 pydantic>=2.0.0
