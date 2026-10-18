@@ -72,7 +72,7 @@ fi
 mkdir -p data/cola_uploads
 
 # 5. Configurar servicio systemd para ejecución 24/7
-echo -e "\n${YELLOW}[6/6] Configurando servicio Systemd para arranque automático...${NC}"
+echo -e "\n${YELLOW}[6/7] Configurando servicio Systemd para arranque automático...${NC}"
 SERVICE_DEST="/etc/systemd/system/mari.service"
 
 # Adaptar mari.service dinámicamente al usuario y ruta actual
@@ -103,6 +103,13 @@ EOF"
 sudo systemctl daemon-reload
 sudo systemctl enable mari.service
 sudo systemctl restart mari.service
+
+# 6. Configurar Hardware Watchdog contra cuelgues del procesador
+echo -e "\n${YELLOW}[7/7] Verificando protección por Hardware Watchdog...${NC}"
+if [ -f "${SCRIPT_DIR}/deploy/configurar_watchdog.sh" ]; then
+    chmod +x "${SCRIPT_DIR}/deploy/configurar_watchdog.sh"
+    bash "${SCRIPT_DIR}/deploy/configurar_watchdog.sh" || echo -e "${YELLOW}⚠️ Watchdog omitido o no compatible con este entorno.${NC}"
+fi
 
 echo -e "\n${GREEN}=====================================================================${NC}"
 echo -e "${GREEN}✓ ¡Instalación de Mari completada con éxito!${NC}"

@@ -73,9 +73,33 @@ docker compose logs -f
 
 ---
 
+## 🛡️ Protección por Hardware Watchdog (Anti-Cuelgues)
+
+Para evitar que la Raspberry Pi quede inaccesible en caso de cuelgues del sistema operativo o picos eléctricos en el laboratorio, se incluye un watchdog a nivel de silicio (Broadcom BCM2835):
+
+```bash
+# Se configura automáticamente al correr ./deploy/instalar_raspberry.sh
+# O puedes ejecutarlo manualmente cuando quieras:
+chmod +x deploy/configurar_watchdog.sh
+sudo ./deploy/configurar_watchdog.sh
+```
+
+Si el kernel o sistema operativo no responde por más de 15 segundos, el microcontrolador de la Raspberry Pi ejecuta un reinicio en frío seguro y levanta a Mari nuevamente.
+
+---
+
+## ⚡ Supervisión Continua de Alimentación y Alertas Térmicas
+
+Mari monitorea el hardware en segundo plano permanentemente:
+1. **Alerta de Subvoltaje / Alimentación:** Si la fuente entrega menos de 4.63V o se detecta throttling por caída de tensión, Mari te enviará una notificación preventiva directa a Telegram para advertirte antes de que se corrompa la tarjeta MicroSD.
+2. **Alerta Térmica Preventiva:** Si la temperatura del CPU supera los 75 °C por calor en obra o ensayos intensivos, Mari te alertará para revisar la ventilación del gabinete.
+3. **Respaldo Automático Diario (20:00 hs):** Mari genera automáticamente una copia de seguridad comprimida `.zip` y te la envía a tu chat de Telegram todas las noches.
+
+---
+
 ## 🩺 Verificación y Comandos en Telegram
 
 Una vez encendida la Raspberry Pi, Mari enviará automáticamente un mensaje a Telegram avisando que el sistema inició tras el encendido o reinicio. También dispones de estos comandos:
 - `/ping`: Para corroborar que responde inmediatamente y ver latencia en ms.
-- `/health`: Diagnóstico completo en vivo (temperatura térmica en °C de la Raspberry Pi, RAM utilizada, CPU, latencia de IA Gemini y estado general).
+- `/health`: Diagnóstico completo en vivo (temperatura térmica en °C, estado de voltaje/fuente de la Raspberry Pi, RAM utilizada, CPU, latencia de IA Gemini y estado general).
 - `/backup`: Genera una copia de seguridad comprimida ZIP con tu historial, memoria, usuarios autorizados y planillas Excel para descargarla directo en Telegram.

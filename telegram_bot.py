@@ -224,19 +224,19 @@ class TTSService:
         if edge_voice == "gtts":
             from gtts import gTTS
             tts = gTTS(text=text, lang="es", tld=tld)
-            tts.save(output_path)
+            await asyncio.to_thread(tts.save, output_path)
             return output_path
 
         try:
             import edge_tts
             communicate = edge_tts.Communicate(text=text, voice=edge_voice)
-            await communicate.save(output_path)
+            await asyncio.wait_for(communicate.save(output_path), timeout=15.0)
             return output_path
         except Exception as exc:
             logger.warning("Edge-TTS (%s) no disponible (%s); conmutando a gTTS fallback", edge_voice, exc)
             from gtts import gTTS
             tts = gTTS(text=text, lang="es", tld=tld)
-            tts.save(output_path)
+            await asyncio.to_thread(tts.save, output_path)
             return output_path
 
 
@@ -458,6 +458,61 @@ def get_system_temperature() -> Dict[str, Any]:
             pass
 
     return {"temp_c": None, "status": "Sin sensor térmico expuesto", "available": False}
+
+
+def get_rpi_throttling_status() -> Dict[str, Any]:
+    """Interpreta las banderas de voltaje y estrangulamiento de vcgencmd en Raspberry Pi."""
+    try:
+        import subprocess
+        res = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and "throttled=" in res.stdout:
+            val_str = res.stdout.strip().split("=")[1]
+            val = int(val_str, 16)
+
+            under_voltage_now = bool(val & 0x1)
+            arm_capped_now = bool(val & 0x2)
+            throttled_now = bool(val & 0x4)
+            soft_temp_limit_now = bool(val & 0x8)
+
+            under_voltage_past = bool(val & 0x10000)
+            arm_capped_past = bool(val & 0x20000)
+            throttled_past = bool(val & 0x40000)
+
+            issues = []
+            if under_voltage_now:
+                issues.append("⚡ Subvoltaje activo (<4.63V en la fuente)")
+            elif under_voltage_past:
+                issues.append("⚠️ Hubo subvoltaje previo desde el arranque")
+
+            if arm_capped_now or throttled_now:
+                issues.append("🐢 CPU throttled (reducido por temperatura o energía)")
+            elif arm_capped_past or throttled_past:
+                issues.append("⚠️ Hubo throttling previo")
+
+            if soft_temp_limit_now:
+                issues.append("🔥 Límite térmico alcanzado")
+
+            return {
+                "raw_hex": val_str,
+                "has_issues": bool(issues),
+                "issues": issues,
+                "under_voltage_now": under_voltage_now,
+                "under_voltage_past": under_voltage_past,
+                "throttled_now": throttled_now,
+                "available": True,
+            }
+    except Exception:
+        pass
+
+    return {
+        "raw_hex": None,
+        "has_issues": False,
+        "issues": [],
+        "under_voltage_now": False,
+        "under_voltage_past": False,
+        "throttled_now": False,
+        "available": False,
+    }
 
 
 def record_admin_chat(chat_id: int) -> None:
@@ -812,13 +867,24 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ram_usage = "psutil no disponible"
 
     # 4. Temperatura de CPU (vital para Raspberry Pi)
+    # 4. Temperatura de CPU (vital para Raspberry Pi)
     temp_info = get_system_temperature()
     if temp_info["available"]:
         temp_str = f"`{temp_info['temp_c']} °C` {temp_info['status']}"
     else:
         temp_str = f"`{temp_info['status']}`"
 
-    # 5. Latencia de API Google Gemini
+    # 5. Estado de Alimentación y Subvoltaje (Raspberry Pi)
+    throttling = get_rpi_throttling_status()
+    if throttling["available"]:
+        if throttling["has_issues"]:
+            volt_str = "⚠️ " + "; ".join(throttling["issues"])
+        else:
+            volt_str = "5.1V Estable (Sin caídas de tensión) 🟢"
+    else:
+        volt_str = "No aplica (Entorno no-Raspberry Pi)"
+
+    # 6. Latencia de API Google Gemini
     gemini_status = "🟡 Pendiente"
     t_start = time.time()
     try:
@@ -833,12 +899,12 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         t_gemini = int((time.time() - t_start) * 1000)
         gemini_status = f"🔴 Error ({t_gemini} ms): {exc}"
 
-    # 6. Voz activa y TTS
+    # 7. Voz activa y TTS
     settings = settings_repo.get_settings()
     voice_key = settings.get("voice_key", "elena")
     voice_name = AVAILABLE_VOICES.get(voice_key, {}).get("name", voice_key)
 
-    # 7. Almacenamiento y cola de trabajo
+    # 8. Almacenamiento y cola de trabajo
     cola_dir = DATA_DIR / "cola_uploads"
     archivos_cola = len(list(cola_dir.glob("*"))) if cola_dir.exists() else 0
     turnos_memoria = memory_repo.count_turns()
@@ -849,6 +915,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"⏱ *Uptime:* `{uptime_str}`\n"
         f"🖥️ *Plataforma:* `{os_name} [{arch}]`\n"
         f"🌡️ *Temp. CPU:* {temp_str}\n"
+        f"⚡ *Alimentación:* `{volt_str}`\n"
         f"🐍 *Python:* `v{py_version}`\n"
         f"⚡ *CPU:* `{cpu_percent}` | *RAM:* `{ram_usage}`\n"
         "──────────────────────────────\n"
@@ -894,44 +961,134 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(f"⚠️ *Error al generar respaldo:* {exc}", parse_mode="Markdown")
 
 
+async def background_supervisor(app: Application) -> None:
+    """Supervisa en segundo plano la temperatura, caídas de tensión y realiza respaldos automáticos diarios."""
+    logger.info("Supervisor en segundo plano activado (temperatura, alimentación y backups diarios).")
+    last_temp_alert_time = 0.0
+    last_volt_alert_time = 0.0
+    last_backup_date = ""
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = time.time()
+            admin_id = get_admin_chat_id()
+            if not admin_id:
+                continue
+
+            # 1. Alerta preventiva de temperatura crítica (CPU >= 75 °C)
+            temp_info = get_system_temperature()
+            if temp_info.get("available") and temp_info.get("temp_c") is not None:
+                temp_c = temp_info["temp_c"]
+                if temp_c >= 75.0 and (now - last_temp_alert_time > 1800):  # Máximo 1 aviso cada 30 min
+                    msg = (
+                        "🔥 *ALERTA TÉRMICA PREVENTIVA EN RASPBERRY PI*\n"
+                        "══════════════════════════════\n"
+                        f"• *Temperatura actual:* `{temp_c} °C` 🔴\n"
+                        "• *Umbral de seguridad:* `75.0 °C`\n"
+                        "• *Riesgo:* Posible estrangulamiento térmico de CPU o reinicio.\n"
+                        "• *Acción recomendada:* Verificar ventilación, disipador o carga de procesos."
+                    )
+                    try:
+                        await app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                        last_temp_alert_time = now
+                    except Exception as exc:
+                        logger.error("Error al enviar alerta térmica preventiva: %s", exc)
+
+            # 2. Alerta preventiva de alimentación / subvoltaje (<4.63V)
+            throttling = get_rpi_throttling_status()
+            if throttling.get("available") and throttling.get("under_voltage_now"):
+                if now - last_volt_alert_time > 1800:  # Máximo 1 aviso cada 30 min
+                    msg = (
+                        "⚡ *ALERTA CRÍTICA DE ALIMENTACIÓN / SUBVOLTAJE*\n"
+                        "══════════════════════════════\n"
+                        "• *Problema:* Caída de tensión por debajo de 4.63V detectada en la Raspberry Pi.\n"
+                        "• *Riesgo:* Inestabilidad en ensayos, reinicios espontáneos o daño en la memoria SD.\n"
+                        "• *Acción recomendada:* Utilizar cargador oficial de 5.1V / 3A (o 5A en Pi 5) y cable corto grueso."
+                    )
+                    try:
+                        await app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+                        last_volt_alert_time = now
+                    except Exception as exc:
+                        logger.error("Error al enviar alerta de voltaje: %s", exc)
+
+            # 3. Respaldo Automático Programado (Diario a las 20:00 hs)
+            from datetime import datetime
+            current_date_str = datetime.now().strftime("%Y-%m-%d")
+            current_hour = datetime.now().hour
+
+            if current_hour >= 20 and last_backup_date != current_date_str:
+                try:
+                    logger.info("Ejecutando respaldo automático diario de las 20:00...")
+                    zip_path = backup_service.create_backup_zip()
+                    size_kb = zip_path.stat().st_size / 1024
+                    with open(zip_path, "rb") as f:
+                        await app.bot.send_document(
+                            chat_id=admin_id,
+                            document=f,
+                            filename=zip_path.name,
+                            caption=(
+                                "📦 *Respaldo Automático Diario - MAMA-Vial*\n"
+                                "══════════════════════════════\n"
+                                f"• *Archivo:* `{zip_path.name}`\n"
+                                f"• *Tamaño:* `{size_kb:.1f} KB`\n"
+                                f"• *Fecha y Hora:* `{datetime.now().strftime('%d/%m/%Y %H:%M')}`\n"
+                                "• *Estado:* Planillas Excel, memoria de conversación y base de datos resguardadas."
+                            ),
+                            parse_mode="Markdown",
+                        )
+                    last_backup_date = current_date_str
+                    logger.info("Respaldo automático programado enviado con éxito a Telegram.")
+                except Exception as exc:
+                    logger.error("Error en respaldo automático programado: %s", exc)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Error inesperado en supervisor en segundo plano: %s", exc)
+            await asyncio.sleep(60)
+
+
 async def on_startup(app: Application) -> None:
-    """Envía notificación de inicio/reinicio al administrador si hay un chat registrado."""
+    """Envía notificación de inicio/reinicio al administrador y lanza supervisor en segundo plano."""
     admin_id = get_admin_chat_id()
-    if not admin_id:
+    if admin_id:
+        os_name = f"{platform.system()} {platform.release()}"
+        arch = platform.machine()
+        is_rpi = False
+        try:
+            if os.path.exists("/proc/device-tree/model"):
+                with open("/proc/device-tree/model", "r", encoding="utf-8", errors="ignore") as f:
+                    model_str = f.read().strip()
+                    if model_str:
+                        os_name = model_str
+                        is_rpi = True
+        except Exception:
+            pass
+
+        temp_info = get_system_temperature()
+        temp_line = f"\n• *Temp. CPU:* `{temp_info['temp_c']} °C` {temp_info['status']}" if temp_info["available"] else ""
+
+        device_icon = "🍓" if is_rpi else "🖥️"
+        msg = (
+            f"{device_icon} *¡Mari en línea tras encendido/reinicio!*\n"
+            f"══════════════════════════════\n"
+            f"• *Dispositivo:* `{os_name} [{arch}]`\n"
+            f"• *Modo:* `24/7 Servicio Autónomo`\n"
+            f"• *Modelo IA:* `{mari_service.preferred_model}`{temp_line}\n"
+            f"══════════════════════════════\n"
+            "Sistema listo para procesar notas de voz, fotos de libreta y planillas viales."
+        )
+        try:
+            await app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+            logger.info("Notificación de arranque enviada al chat %s.", admin_id)
+        except Exception as exc:
+            logger.warning("No se pudo enviar notificación de arranque: %s", exc)
+    else:
         logger.info("Mari iniciada (sin chat_id de administrador registrado para aviso automático).")
-        return
 
-    os_name = f"{platform.system()} {platform.release()}"
-    arch = platform.machine()
-    is_rpi = False
-    try:
-        if os.path.exists("/proc/device-tree/model"):
-            with open("/proc/device-tree/model", "r", encoding="utf-8", errors="ignore") as f:
-                model_str = f.read().strip()
-                if model_str:
-                    os_name = model_str
-                    is_rpi = True
-    except Exception:
-        pass
-
-    temp_info = get_system_temperature()
-    temp_line = f"\n• *Temp. CPU:* `{temp_info['temp_c']} °C` {temp_info['status']}" if temp_info["available"] else ""
-
-    device_icon = "🍓" if is_rpi else "🖥️"
-    msg = (
-        f"{device_icon} *¡Mari en línea tras encendido/reinicio!*\n"
-        f"══════════════════════════════\n"
-        f"• *Dispositivo:* `{os_name} [{arch}]`\n"
-        f"• *Modo:* `24/7 Servicio Autónomo`\n"
-        f"• *Modelo IA:* `{mari_service.preferred_model}`{temp_line}\n"
-        f"══════════════════════════════\n"
-        "Sistema listo para procesar notas de voz, fotos de libreta y planillas viales."
-    )
-    try:
-        await app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
-        logger.info("Notificación de arranque enviada al chat %s.", admin_id)
-    except Exception as exc:
-        logger.warning("No se pudo enviar notificación de arranque: %s", exc)
+    # Iniciar supervisor en segundo plano para alertas preventivas y backups
+    asyncio.create_task(background_supervisor(app))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
