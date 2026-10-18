@@ -1,0 +1,44 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+env/
+
+# Variables de entorno y secretos (NUNCA subir a GitHub)
+.env
+.env.*
+!.env.example
+
+# Bytecode y caches de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+
+# Archivos de datos de ejecución y memoria dinámica
+data/memory_*.json
+data/settings_*.json
+data/authorized_users.json
+data/cola_uploads/*
+!data/cola_uploads/.gitkeep
+
+# Archivos generados y temporales de prueba
+*.pdf
+*.mp3
+*.wav
+*.ogg
+*_Actualizada.xlsx
+test_*.xlsx
+test_*
+
+# Repositorios externos o subcarpetas clonadas
+openjarvis/
+
+# IDEs y sistemas operativos
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
