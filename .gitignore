@@ -21,6 +21,8 @@ __pycache__/
 data/memory_*.json
 data/settings_*.json
 data/authorized_users.json
+data/admin_chat.json
+data/backups/
 data/cola_uploads/*
 !data/cola_uploads/.gitkeep
 

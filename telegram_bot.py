@@ -45,6 +45,7 @@ from google import genai
 from google.genai import types
 
 from services.auth_service import AuthService
+from services.backup_service import BackupService
 from services.excel_injector import ExcelInjectorService
 from services.lab_calculator import LabSpreadsheetService
 from services.pdf_generator import LabPdfReportService, generar_informe_pdf
@@ -64,6 +65,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 MEMORY_FILE = DATA_DIR / "memory_mari.json"
 SETTINGS_FILE = DATA_DIR / "settings_mari.json"
+ADMIN_CHAT_FILE = DATA_DIR / "admin_chat.json"
 
 SYSTEM_PROMPT = (
     "Eres Mari, la asistente personal de laboratorio vial, topografía y desarrollo de software de Franco y de su equipo de trabajo.\n"
@@ -404,6 +406,83 @@ memory_repo = MemoryRepository()
 tts_service = TTSService(settings_repo)
 mari_service = GeminiAssistantService(memory_repo)
 auth_service = AuthService()
+backup_service = BackupService()
+
+
+# ---------------------------------------------------------------------------
+# Sensores de Hardware y Monitoreo Térmico (Raspberry Pi & Linux)
+# ---------------------------------------------------------------------------
+def get_system_temperature() -> Dict[str, Any]:
+    """Obtiene la temperatura de CPU en Raspberry Pi OS / Linux o estado informativo en Windows."""
+    # 1. Thermal zone nativa del kernel Linux (Raspberry Pi OS)
+    thermal_file = Path("/sys/class/thermal/thermal_zone0/temp")
+    if thermal_file.exists():
+        try:
+            with open(thermal_file, "r", encoding="utf-8", errors="ignore") as f:
+                raw = f.read().strip()
+                temp_c = float(raw) / 1000.0
+                if temp_c <= 60.0:
+                    status = "🟢 Óptima"
+                elif temp_c <= 75.0:
+                    status = "🟡 Moderada"
+                else:
+                    status = "🔴 Alta (Disipador requerido)"
+                return {"temp_c": round(temp_c, 1), "status": status, "available": True}
+        except Exception:
+            pass
+
+    # 2. Comando vcgencmd en Raspberry Pi
+    try:
+        import subprocess
+        res = subprocess.run(["vcgencmd", "measure_temp"], capture_output=True, text=True, timeout=1)
+        if res.returncode == 0 and "temp=" in res.stdout:
+            match = re.search(r"temp=([\d\.]+)", res.stdout)
+            if match:
+                temp_c = float(match.group(1))
+                status = "🟢 Óptima" if temp_c <= 60.0 else ("🟡 Moderada" if temp_c <= 75.0 else "🔴 Alta")
+                return {"temp_c": round(temp_c, 1), "status": status, "available": True}
+    except Exception:
+        pass
+
+    # 3. Psutil sensors_temperatures si estuviera disponible
+    if psutil is not None and hasattr(psutil, "sensors_temperatures"):
+        try:
+            temps = psutil.sensors_temperatures()
+            if temps:
+                for _, entries in temps.items():
+                    if entries:
+                        temp_c = entries[0].current
+                        status = "🟢 Óptima" if temp_c <= 60.0 else ("🟡 Moderada" if temp_c <= 75.0 else "🔴 Alta")
+                        return {"temp_c": round(temp_c, 1), "status": status, "available": True}
+        except Exception:
+            pass
+
+    return {"temp_c": None, "status": "Sin sensor térmico expuesto", "available": False}
+
+
+def record_admin_chat(chat_id: int) -> None:
+    """Guarda el chat_id del operador principal para avisos automáticos de encendido/reinicio."""
+    try:
+        ADMIN_CHAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(ADMIN_CHAT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"chat_id": chat_id, "updated_at": time.time()}, f, indent=2)
+    except Exception as exc:
+        logger.warning("No se pudo registrar admin_chat: %s", exc)
+
+
+def get_admin_chat_id() -> Optional[int]:
+    """Recupera el chat_id del administrador desde variable de entorno o archivo persistente."""
+    env_id = os.environ.get("ADMIN_CHAT_ID")
+    if env_id and env_id.strip().lstrip("-").isdigit():
+        return int(env_id.strip())
+    if ADMIN_CHAT_FILE.exists():
+        try:
+            with open(ADMIN_CHAT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("chat_id")
+        except Exception:
+            pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -413,12 +492,15 @@ def is_authorized(update: Update) -> bool:
     if not update.effective_user:
         return False
     user = update.effective_user
-    return auth_service.is_user_authorized(
+    authorized = auth_service.is_user_authorized(
         user_id=user.id,
         username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
     )
+    if authorized and update.effective_chat:
+        record_admin_chat(update.effective_chat.id)
+    return authorized
 
 
 async def send_unauthorized_message(update: Update) -> None:
@@ -538,7 +620,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• `/analizar_lote`: Cruzar y procesar todas las planillas Excel en cola y generar informe PDF\n"
         "• `/limpiar_lote`: Vaciar la cola de planillas temporal\n"
         "• `/ping`: Comprobar respuesta inmediata y latencia\n"
-        "• `/health`: Diagnóstico integral de CPU, RAM, IA Gemini y estado del sistema"
+        "• `/health`: Diagnóstico integral de CPU, RAM, temperatura, IA y estado\n"
+        "• `/backup`: Descargar copia de seguridad ZIP de planillas y memoria"
     )
     await update.message.reply_text(saludo, parse_mode="Markdown")
 
@@ -728,7 +811,14 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         ram_usage = "psutil no disponible"
 
-    # 4. Latencia de API Google Gemini
+    # 4. Temperatura de CPU (vital para Raspberry Pi)
+    temp_info = get_system_temperature()
+    if temp_info["available"]:
+        temp_str = f"`{temp_info['temp_c']} °C` {temp_info['status']}"
+    else:
+        temp_str = f"`{temp_info['status']}`"
+
+    # 5. Latencia de API Google Gemini
     gemini_status = "🟡 Pendiente"
     t_start = time.time()
     try:
@@ -743,12 +833,12 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         t_gemini = int((time.time() - t_start) * 1000)
         gemini_status = f"🔴 Error ({t_gemini} ms): {exc}"
 
-    # 5. Voz activa y TTS
+    # 6. Voz activa y TTS
     settings = settings_repo.get_settings()
     voice_key = settings.get("voice_key", "elena")
     voice_name = AVAILABLE_VOICES.get(voice_key, {}).get("name", voice_key)
 
-    # 6. Almacenamiento y cola de trabajo
+    # 7. Almacenamiento y cola de trabajo
     cola_dir = DATA_DIR / "cola_uploads"
     archivos_cola = len(list(cola_dir.glob("*"))) if cola_dir.exists() else 0
     turnos_memoria = memory_repo.count_turns()
@@ -758,6 +848,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "══════════════════════════════\n"
         f"⏱ *Uptime:* `{uptime_str}`\n"
         f"🖥️ *Plataforma:* `{os_name} [{arch}]`\n"
+        f"🌡️ *Temp. CPU:* {temp_str}\n"
         f"🐍 *Python:* `v{py_version}`\n"
         f"⚡ *CPU:* `{cpu_percent}` | *RAM:* `{ram_usage}`\n"
         "──────────────────────────────\n"
@@ -769,6 +860,78 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "✅ *Estado:* Totalmente operativo para trabajo de campo."
     )
     await status_msg.edit_text(informe, parse_mode="Markdown")
+
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Genera una copia de seguridad comprimida ZIP y la envía por Telegram."""
+    if not update.effective_chat or not update.message:
+        return
+    if not is_authorized(update):
+        await send_unauthorized_message(update)
+        return
+
+    status_msg = await update.message.reply_text("📦 *Generando copia de seguridad ZIP de Mari...*", parse_mode="Markdown")
+    try:
+        zip_path = backup_service.create_backup_zip()
+        size_kb = zip_path.stat().st_size / 1024
+
+        await status_msg.edit_text("📤 *Subiendo archivo de respaldo...*", parse_mode="Markdown")
+        with open(zip_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=zip_path.name,
+                caption=(
+                    f"💾 *Copia de Seguridad - MAMA-Vial*\n"
+                    f"• *Archivo:* `{zip_path.name}`\n"
+                    f"• *Tamaño:* `{size_kb:.1f} KB`\n"
+                    f"• *Contenido:* Memoria, ajustes, usuarios autorizados y planillas Excel."
+                ),
+                parse_mode="Markdown",
+            )
+        await status_msg.delete()
+    except Exception as exc:
+        logger.error("Error en comando /backup: %s", exc)
+        await status_msg.edit_text(f"⚠️ *Error al generar respaldo:* {exc}", parse_mode="Markdown")
+
+
+async def on_startup(app: Application) -> None:
+    """Envía notificación de inicio/reinicio al administrador si hay un chat registrado."""
+    admin_id = get_admin_chat_id()
+    if not admin_id:
+        logger.info("Mari iniciada (sin chat_id de administrador registrado para aviso automático).")
+        return
+
+    os_name = f"{platform.system()} {platform.release()}"
+    arch = platform.machine()
+    is_rpi = False
+    try:
+        if os.path.exists("/proc/device-tree/model"):
+            with open("/proc/device-tree/model", "r", encoding="utf-8", errors="ignore") as f:
+                model_str = f.read().strip()
+                if model_str:
+                    os_name = model_str
+                    is_rpi = True
+    except Exception:
+        pass
+
+    temp_info = get_system_temperature()
+    temp_line = f"\n• *Temp. CPU:* `{temp_info['temp_c']} °C` {temp_info['status']}" if temp_info["available"] else ""
+
+    device_icon = "🍓" if is_rpi else "🖥️"
+    msg = (
+        f"{device_icon} *¡Mari en línea tras encendido/reinicio!*\n"
+        f"══════════════════════════════\n"
+        f"• *Dispositivo:* `{os_name} [{arch}]`\n"
+        f"• *Modo:* `24/7 Servicio Autónomo`\n"
+        f"• *Modelo IA:* `{mari_service.preferred_model}`{temp_line}\n"
+        f"══════════════════════════════\n"
+        "Sistema listo para procesar notas de voz, fotos de libreta y planillas viales."
+    )
+    try:
+        await app.bot.send_message(chat_id=admin_id, text=msg, parse_mode="Markdown")
+        logger.info("Notificación de arranque enviada al chat %s.", admin_id)
+    except Exception as exc:
+        logger.warning("No se pudo enviar notificación de arranque: %s", exc)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1192,7 +1355,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def run_bot() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(on_startup).build()
 
     # Comandos
     app.add_handler(CommandHandler("start", start_command))
@@ -1204,6 +1367,7 @@ def run_bot() -> None:
     app.add_handler(CommandHandler("limpiar_lote", handle_limpiar_lote))
     app.add_handler(CommandHandler("ping", ping_command))
     app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("backup", backup_command))
 
     # Botones interactivos
     app.add_handler(CallbackQueryHandler(voice_callback))

@@ -73,8 +73,9 @@ docker compose logs -f
 
 ---
 
-## 🩺 Verificación en Telegram
+## 🩺 Verificación y Comandos en Telegram
 
-Una vez encendida la Raspberry Pi, puedes enviar a [@Asistente_labotario_bot](https://t.me/Asistente_labotario_bot):
-- `/ping`: Para corroborar que responde inmediatamente.
-- `/health`: Para ver el diagnóstico completo (temperatura/CPU, RAM utilizada en la Raspberry Pi, latencia de IA Gemini y estado general).
+Una vez encendida la Raspberry Pi, Mari enviará automáticamente un mensaje a Telegram avisando que el sistema inició tras el encendido o reinicio. También dispones de estos comandos:
+- `/ping`: Para corroborar que responde inmediatamente y ver latencia en ms.
+- `/health`: Diagnóstico completo en vivo (temperatura térmica en °C de la Raspberry Pi, RAM utilizada, CPU, latencia de IA Gemini y estado general).
+- `/backup`: Genera una copia de seguridad comprimida ZIP con tu historial, memoria, usuarios autorizados y planillas Excel para descargarla directo en Telegram.

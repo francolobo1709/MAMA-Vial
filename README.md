@@ -102,11 +102,13 @@ sudo systemctl status mari.service      # Estado del proceso
 
 ---
 
-## 🩺 Diagnóstico y Monitoreo en Telegram
+## 🩺 Diagnóstico, Notificaciones y Backups en Telegram
 
-El bot cuenta con comandos dedicados de diagnóstico de salud y rendimiento:
+El bot cuenta con herramientas integradas de supervisión y resguardo:
+- **Aviso automático de reinicio**: Notifica al administrador al encender o reiniciar la Raspberry Pi.
 - `/ping`: Verifica conectividad con Telegram y latencia en milisegundos.
-- `/health`: Reporte integral de consumo de CPU, RAM del sistema y del proceso, latencia real contra Google Gemini API, turnos de memoria activa y locutora en uso.
+- `/health`: Reporte integral de consumo de CPU, temperatura térmica en °C (Raspberry Pi), RAM del sistema y del proceso, latencia real contra Google Gemini API, turnos de memoria activa y locutora en uso.
+- `/backup`: Genera una copia de seguridad comprimida ZIP con tu historial de memoria, ajustes, usuarios autorizados y planillas Excel para descargarla directo en Telegram.
 
 ---
 
